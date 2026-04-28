@@ -11,12 +11,11 @@ Accounts:
   admin (Admin button) / admin123
 """
 
-import io, csv, re, sqlite3, json, math, logging, psycopg2
+import io, csv, re, sqlite3, json, math, logging, psycopg2, os, psycopg2.extras
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
-pip install psycopg2-binary
 
 import numpy as np
 from flask import Flask, request, jsonify, session, send_file, send_from_directory, g
