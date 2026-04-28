@@ -11,7 +11,7 @@ Accounts:
   admin (Admin button) / admin123
 """
 
-import io, csv, re, sqlite3, json, math, logging, psycopg2
+import io, csv, re, json, math, logging, psycopg2
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -27,7 +27,6 @@ log = logging.getLogger('PhishShield')
 
 # ── App config ────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
-DB_PATH  = BASE_DIR / 'phishshield.db'
 
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path='')
 app.secret_key = 'phishshield-v3-bca-2025-strong-key'
@@ -529,31 +528,35 @@ MODEL_INFO = {k: {'name': v['name'], 'accuracy': v['accuracy'], 'type': v['type'
 # ═══════════════════════════════════════════════════════════════════
 # SQLite DATABASE
 # ═══════════════════════════════════════════════════════════════════
+import os
+import psycopg2
+import psycopg2.extras
+
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
 def get_db():
     if 'db' not in g:
-        g.db = sqlite3.connect(str(DB_PATH), detect_types=sqlite3.PARSE_DECLTYPES)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA journal_mode=WAL")
-        g.db.execute("PRAGMA foreign_keys=ON")
+        g.db = psycopg2.connect(DATABASE_URL)
+        g.db.autocommit = False
     return g.db
 
 @app.teardown_appcontext
 def close_db(exc=None):
     db = g.pop('db', None)
     if db: db.close()
-
 def query(sql, params=(), one=False):
-    db  = get_db()
-    cur = db.execute(sql, params)
+    db = get_db()
+    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(sql, params)
     db.commit()
     if one:
-        row = cur.fetchone()
-        return dict(row) if row else None
-    return [dict(r) for r in cur.fetchall()]
+        return cur.fetchone()
+    return cur.fetchall()
 
 def execute(sql, params=()):
-    db  = get_db()
-    cur = db.execute(sql, params)
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(sql, params)
     db.commit()
     return cur
 
