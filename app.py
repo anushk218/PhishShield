@@ -11,8 +11,8 @@ Accounts:
   admin (Admin button) / admin123
 """
 
-pip install psycopg2-binary
-import io, csv, re, sqlite3, json, math, logging, psycopg2, os
+
+import io, csv, re, sqlite3, json, math, logging, psycopg2, os, psycopg2.extras
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
