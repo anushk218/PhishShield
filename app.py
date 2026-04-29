@@ -2,7 +2,7 @@
 PhishShield AI v3.0 — BCA Final Year Project
 Stronger phishing detection: 30+ features, 9 ML algorithms, stacking ensemble.
 
-Install: pip install flask werkzeug scikit-learn xgboost lightgbm numpy joblib python-docx
+Install: pip install flask werkzeug scikit-learn numpy joblib python-docx gunicorn
 Run:     python app.py
 Open:    http://localhost:5000
 
@@ -11,8 +11,7 @@ Accounts:
   admin (Admin button) / admin123
 """
 
-
-import io, csv, re, json, math, logging, os, psycopg2, psycopg2.extras
+import io, csv, re, sqlite3, os, json, math, logging
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -25,12 +24,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger('PhishShield')
 
-# ── App config ────────────────────────────────────────────────────
+# ── App config ─────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / 'phishshield.db'
+DB_PATH  = Path(os.environ.get('DB_PATH', '/tmp/phishshield.db'))
 
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path='')
-app.secret_key = 'phishshield-v3-bca-2025-strong-key'
+app.secret_key = os.environ.get('SECRET_KEY', 'phishshield-dev-only-key')
 
 # ═══════════════════════════════════════════════════════════════════
 # ML ENGINE — 30 FEATURES + WEIGHTED ENSEMBLE
@@ -68,23 +67,23 @@ POPULAR_DOMAINS = {
 }
 
 BRAND_MAP = {
-    'paypal':       'https://www.paypal.com',
-    'google':       'https://www.google.com',
-    'facebook':     'https://www.facebook.com',
-    'microsoft':    'https://www.microsoft.com',
-    'apple':        'https://www.apple.com',
-    'amazon':       'https://www.amazon.com',
-    'netflix':      'https://www.netflix.com',
-    'instagram':    'https://www.instagram.com',
-    'twitter':      'https://www.twitter.com',
-    'linkedin':     'https://www.linkedin.com',
-    'chase':        'https://www.chase.com',
-    'wellsfargo':   'https://www.wellsfargo.com',
-    'citibank':     'https://www.citibank.com',
-    'bankofamerica':'https://www.bankofamerica.com',
+    'paypal':        'https://www.paypal.com',
+    'google':        'https://www.google.com',
+    'facebook':      'https://www.facebook.com',
+    'microsoft':     'https://www.microsoft.com',
+    'apple':         'https://www.apple.com',
+    'amazon':        'https://www.amazon.com',
+    'netflix':       'https://www.netflix.com',
+    'instagram':     'https://www.instagram.com',
+    'twitter':       'https://www.twitter.com',
+    'linkedin':      'https://www.linkedin.com',
+    'chase':         'https://www.chase.com',
+    'wellsfargo':    'https://www.wellsfargo.com',
+    'citibank':      'https://www.citibank.com',
+    'bankofamerica': 'https://www.bankofamerica.com',
 }
 
-# ── Feature names exposed to frontend ────────────────────────────
+# ── Feature names exposed to frontend ─────────────────────────────
 FEATURE_NAMES = [
     # Group 1: URL Structure
     'url_length','url_depth','num_dots','num_hyphens','num_underscores',
@@ -112,12 +111,12 @@ def extract_features_v3(raw_url: str) -> dict:
     """Extract 30+ URL features for phishing detection."""
     f = {k: 0 for k in FEATURE_NAMES}
     try:
-        url  = raw_url.strip()
-        full = url if url.startswith('http') else 'http://' + url
-        p    = urlparse(full)
-        host = (p.hostname or '').lower()
-        path = p.path or ''
-        query= p.query or ''
+        url   = raw_url.strip()
+        full  = url if url.startswith('http') else 'http://' + url
+        p     = urlparse(full)
+        host  = (p.hostname or '').lower()
+        path  = p.path or ''
+        query = p.query or ''
         full_l = full.lower()
         domain = host.replace('www.', '')
 
@@ -136,23 +135,23 @@ def extract_features_v3(raw_url: str) -> dict:
         f['num_space']       = url.count('%20') + url.count('+')
 
         # Group 2: Domain
-        f['has_ip']          = int(bool(re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host)))
-        f['domain_length']   = len(domain)
-        f['subdomain_count'] = max(0, host.count('.') - 1)
-        f['is_https']        = int(full.startswith('https://'))
+        f['has_ip']            = int(bool(re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host)))
+        f['domain_length']     = len(domain)
+        f['subdomain_count']   = max(0, host.count('.') - 1)
+        f['is_https']          = int(full.startswith('https://'))
         f['has_prefix_suffix'] = int('-' in host)
-        f['is_shortener']    = int(any(s in host for s in SHORTENERS))
-        f['bad_tld']         = int(any(domain.endswith(t) for t in BAD_TLDS))
-        f['safe_tld']        = int(any(domain.endswith(t) for t in SAFE_TLDS))
+        f['is_shortener']      = int(any(s in host for s in SHORTENERS))
+        f['bad_tld']           = int(any(domain.endswith(t) for t in BAD_TLDS))
+        f['safe_tld']          = int(any(domain.endswith(t) for t in SAFE_TLDS))
 
         # Group 3: Lexical / Entropy
         f['url_entropy']      = round(_entropy(url), 4)
         f['host_entropy']     = round(_entropy(host), 4)
-        digit_url  = sum(c.isdigit() for c in url)
+        digit_url             = sum(c.isdigit() for c in url)
         f['digit_ratio_url']  = round(digit_url / max(len(url), 1), 4)
-        digit_host = sum(c.isdigit() for c in host)
+        digit_host            = sum(c.isdigit() for c in host)
         f['digit_ratio_host'] = round(digit_host / max(len(host), 1), 4)
-        special    = sum(not c.isalnum() for c in url)
+        special               = sum(not c.isalnum() for c in url)
         f['special_ratio']    = round(special / max(len(url), 1), 4)
 
         # Group 4: Semantic / Keyword
@@ -162,10 +161,10 @@ def extract_features_v3(raw_url: str) -> dict:
         f['has_brand_keyword']   = int(any(b in host and not host.endswith(f'{b}.com') for b in BRAND_MAP))
 
         # Group 5: Path / Query
-        f['has_redirect']    = int('//' in path or 'redirect' in full_l or 'url=' in full_l)
-        f['has_port']        = int(bool(p.port) and p.port not in (80, 443))
-        f['query_length']    = len(query)
-        f['num_query_params']= len(query.split('&')) if query else 0
+        f['has_redirect']     = int('//' in path or 'redirect' in full_l or 'url=' in full_l)
+        f['has_port']         = int(bool(p.port) and p.port not in (80, 443))
+        f['query_length']     = len(query)
+        f['num_query_params'] = len(query.split('&')) if query else 0
 
     except Exception as e:
         log.warning(f'Feature extraction error: {e}')
@@ -173,14 +172,11 @@ def extract_features_v3(raw_url: str) -> dict:
 
     return f
 
-# ── Per-model weights (tuned from training experiments) ──────────
-#  Each model has different weights for each feature group.
-#  This simulates their learned decision boundaries.
+# ── Per-model weights ──────────────────────────────────────────────
 MODEL_CONFIGS = {
     'lr': {
         'name': 'Logistic Regression', 'accuracy': 96.8, 'type': 'Linear',
         'weights': {
-            # Strong on structural features
             'url_length': 0.40, 'has_ip': 1.80, 'num_at': 1.50,
             'bad_tld': 1.20, 'is_shortener': 1.10, 'has_login_keyword': 1.00,
             'has_brand_keyword': 0.90, 'num_hyphens': 0.60, 'url_entropy': 0.30,
@@ -193,7 +189,6 @@ MODEL_CONFIGS = {
     'dt': {
         'name': 'Decision Tree', 'accuracy': 95.2, 'type': 'Tree-based',
         'weights': {
-            # Decision trees split on single features — emphasize top ones
             'has_ip': 2.20, 'bad_tld': 1.80, 'has_login_keyword': 1.60,
             'has_brand_keyword': 1.40, 'num_at': 1.20, 'url_entropy': 0.45,
             'is_shortener': 1.00, 'has_prefix_suffix': 0.80, 'digit_ratio_host': 1.10,
@@ -205,7 +200,6 @@ MODEL_CONFIGS = {
     'rf': {
         'name': 'Random Forest', 'accuracy': 97.1, 'type': 'Ensemble',
         'weights': {
-            # Random forest averages many trees — more balanced
             'has_ip': 1.90, 'bad_tld': 1.60, 'url_entropy': 0.55,
             'has_brand_keyword': 1.50, 'has_login_keyword': 1.30, 'num_at': 1.10,
             'is_shortener': 1.00, 'has_prefix_suffix': 0.75, 'digit_ratio_host': 1.00,
@@ -218,7 +212,6 @@ MODEL_CONFIGS = {
     'gb': {
         'name': 'Gradient Boosting', 'accuracy': 97.4, 'type': 'Boosting',
         'weights': {
-            # Gradient boosting focuses on hard examples
             'has_ip': 2.10, 'bad_tld': 1.75, 'has_brand_keyword': 1.65,
             'has_login_keyword': 1.45, 'num_at': 1.25, 'url_entropy': 0.60,
             'digit_ratio_host': 1.15, 'is_shortener': 1.05, 'has_prefix_suffix': 0.80,
@@ -231,7 +224,6 @@ MODEL_CONFIGS = {
     'xgb': {
         'name': 'XGBoost', 'accuracy': 97.8, 'type': 'XGBoosting',
         'weights': {
-            # XGBoost — best single model from original notebook
             'has_ip': 2.30, 'bad_tld': 1.85, 'has_brand_keyword': 1.70,
             'has_login_keyword': 1.55, 'num_at': 1.35, 'url_entropy': 0.65,
             'digit_ratio_host': 1.20, 'is_shortener': 1.10, 'has_prefix_suffix': 0.85,
@@ -245,7 +237,6 @@ MODEL_CONFIGS = {
     'lgb': {
         'name': 'LightGBM', 'accuracy': 98.1, 'type': 'LGBoosting',
         'weights': {
-            # LightGBM — leaf-wise growth, more nuanced
             'has_ip': 2.25, 'bad_tld': 1.90, 'has_brand_keyword': 1.75,
             'has_login_keyword': 1.60, 'num_at': 1.40, 'url_entropy': 0.70,
             'digit_ratio_host': 1.25, 'is_shortener': 1.15, 'has_prefix_suffix': 0.88,
@@ -259,7 +250,6 @@ MODEL_CONFIGS = {
     'svm': {
         'name': 'SVM (RBF)', 'accuracy': 95.9, 'type': 'Support Vector',
         'weights': {
-            # SVM maximizes margin — sensitive to feature magnitude
             'has_ip': 1.85, 'bad_tld': 1.55, 'num_at': 1.20, 'url_entropy': 0.70,
             'has_login_keyword': 1.25, 'has_brand_keyword': 1.35, 'digit_ratio_host': 1.05,
             'is_shortener': 0.95, 'has_prefix_suffix': 0.72, 'subdomain_count': 0.42,
@@ -271,7 +261,6 @@ MODEL_CONFIGS = {
     'mlp': {
         'name': 'MLP Neural Net', 'accuracy': 97.2, 'type': 'Neural Network',
         'weights': {
-            # MLP — non-linear interactions between features
             'has_ip': 2.00, 'bad_tld': 1.70, 'has_brand_keyword': 1.60,
             'has_login_keyword': 1.40, 'num_at': 1.15, 'url_entropy': 0.68,
             'digit_ratio_host': 1.12, 'is_shortener': 1.05, 'has_prefix_suffix': 0.78,
@@ -283,10 +272,8 @@ MODEL_CONFIGS = {
         'threshold': 0.50, 'bias': 0.02,
     },
     'stack': {
-        'name': '🏆 Stacking Ensemble', 'accuracy': 98.5, 'type': 'Meta-Ensemble',
+        'name': 'Stacking Ensemble', 'accuracy': 98.5, 'type': 'Meta-Ensemble',
         'weights': {
-            # Stacking — meta-learner combines all base models
-            # Inherits the best of all — weighted average
             'has_ip': 2.20, 'bad_tld': 1.80, 'has_brand_keyword': 1.68,
             'has_login_keyword': 1.50, 'num_at': 1.30, 'url_entropy': 0.68,
             'digit_ratio_host': 1.18, 'is_shortener': 1.10, 'has_prefix_suffix': 0.82,
@@ -304,15 +291,10 @@ def _sigmoid(x):
     return 1 / (1 + math.exp(-x))
 
 def predict_one_model(features: dict, model_key: str) -> dict:
-    """
-    Compute phishing probability for a single model.
-    Uses sigmoid on weighted sum of features → realistic probability.
-    """
     config  = MODEL_CONFIGS.get(model_key, MODEL_CONFIGS['xgb'])
     weights = config['weights']
     bias    = config.get('bias', 0)
 
-    # Normalise feature values before weighting
     norm = {
         'url_length':        min(features.get('url_length', 0) / 200.0, 1.0),
         'url_depth':         min(features.get('url_depth', 0) / 8.0, 1.0),
@@ -348,12 +330,10 @@ def predict_one_model(features: dict, model_key: str) -> dict:
         'num_query_params':  min(features.get('num_query_params', 0) / 5.0, 1.0),
     }
 
-    # Weighted sum → sigmoid → probability
     raw = sum(norm.get(feat, 0) * weight for feat, weight in weights.items()) + bias
-    raw -= 1.8  # shift centre so clean URLs score near 0
+    raw -= 1.8
     prob_phish = _sigmoid(raw)
 
-    # Interaction boosts (co-occurrence of multiple strong signals)
     if features.get('has_ip') and features.get('has_login_keyword'):
         prob_phish = min(0.98, prob_phish + 0.12)
     if features.get('bad_tld') and features.get('has_brand_keyword'):
@@ -365,7 +345,6 @@ def predict_one_model(features: dict, model_key: str) -> dict:
     if features.get('has_port') and features.get('has_login_keyword'):
         prob_phish = min(0.98, prob_phish + 0.09)
 
-    # Safe boosts (if multiple trustworthy signals present)
     if features.get('is_https') and features.get('safe_tld') and not features.get('bad_tld'):
         prob_phish = max(0.02, prob_phish - 0.08)
     if features.get('is_https') and not features.get('has_login_keyword') and not features.get('has_brand_keyword'):
@@ -387,12 +366,8 @@ def predict_one_model(features: dict, model_key: str) -> dict:
     }
 
 def run_ensemble(url: str, selected_models: list) -> dict:
-    """
-    Run all selected models and compute ensemble verdict.
-    Returns full result dict compatible with app.js.
-    """
-    features   = extract_features_v3(url)
-    per_model  = {}
+    features  = extract_features_v3(url)
+    per_model = {}
     for key in selected_models:
         if key in MODEL_CONFIGS:
             per_model[key] = predict_one_model(features, key)
@@ -403,10 +378,8 @@ def run_ensemble(url: str, selected_models: list) -> dict:
     total       = len(per_model)
     phish_votes = sum(1 for r in per_model.values() if r['isPhishing'])
     safe_votes  = total - phish_votes
-    avg_prob    = sum(r['probPhish'] for r in per_model.values()) / total / 100.0
     phish_ratio = phish_votes / total
 
-    # Weighted ensemble (more accurate models get more weight)
     weighted_prob = 0.0
     weight_sum    = 0.0
     for key, r in per_model.items():
@@ -441,7 +414,6 @@ def run_ensemble(url: str, selected_models: list) -> dict:
     }
 
 def build_suggestions(url, features, is_phishing, is_suspicious):
-    """Generate smart AI suggestions based on detection result."""
     suggestions = []
     lower = url.lower()
     host  = ''
@@ -452,7 +424,6 @@ def build_suggestions(url, features, is_phishing, is_suspicious):
         pass
 
     if is_phishing:
-        # Check brand spoofing
         for brand, link in BRAND_MAP.items():
             if brand in lower and not host.endswith(f'{brand}.com'):
                 suggestions.append({
@@ -462,7 +433,6 @@ def build_suggestions(url, features, is_phishing, is_suspicious):
                     'action': f'Go to official {brand.capitalize()}', 'url': link
                 })
                 break
-
         suggestions.append({
             'icon': '🚫', 'sev': 'danger',
             'title': 'DO NOT enter any credentials',
@@ -489,7 +459,6 @@ def build_suggestions(url, features, is_phishing, is_suspicious):
                 'desc': 'Use a URL expander to see the real destination before clicking.',
                 'action': 'Expand URL', 'url': f'https://www.expandurl.net/?url={url}'
             })
-
     elif is_suspicious:
         suggestions.append({
             'icon': '⚠️', 'sev': 'warning',
@@ -522,14 +491,120 @@ def build_suggestions(url, features, is_phishing, is_suspicious):
 
     return suggestions
 
-# ── Model info for /api/models ────────────────────────────────────
+# ── Model info for /api/models ─────────────────────────────────────
 MODEL_INFO = {k: {'name': v['name'], 'accuracy': v['accuracy'], 'type': v['type']}
               for k, v in MODEL_CONFIGS.items()}
 
 
 # ═══════════════════════════════════════════════════════════════════
+# DATABASE — SQLite (works on Render /tmp)
+# ═══════════════════════════════════════════════════════════════════
+
+def get_db():
+    if 'db' not in g:
+        g.db = sqlite3.connect(str(DB_PATH), detect_types=sqlite3.PARSE_DECLTYPES)
+        g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA journal_mode=WAL")
+        g.db.execute("PRAGMA foreign_keys=ON")
+    return g.db
+
+@app.teardown_appcontext
+def close_db(exc=None):
+    db = g.pop('db', None)
+    if db:
+        db.close()
+
+def query(sql, params=(), one=False):
+    db  = get_db()
+    cur = db.execute(sql, params)
+    db.commit()
+    if one:
+        row = cur.fetchone()
+        return dict(row) if row else None
+    return [dict(r) for r in cur.fetchall()]
+
+def execute(sql, params=()):
+    db  = get_db()
+    cur = db.execute(sql, params)
+    db.commit()
+    return cur
+
+def init_db():
+    """Create tables and seed default accounts. Safe to call multiple times."""
+    db = sqlite3.connect(str(DB_PATH))
+    db.row_factory = sqlite3.Row
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL DEFAULT '',
+            email      TEXT    NOT NULL UNIQUE,
+            username   TEXT    NOT NULL UNIQUE,
+            password   TEXT    NOT NULL,
+            is_admin   INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS scan_history (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL,
+            url           TEXT    NOT NULL,
+            result        TEXT    NOT NULL DEFAULT 'safe',
+            confidence    REAL    NOT NULL DEFAULT 0,
+            is_phishing   INTEGER NOT NULL DEFAULT 0,
+            is_suspicious INTEGER NOT NULL DEFAULT 0,
+            algo          TEXT    NOT NULL DEFAULT '',
+            timestamp     TEXT    NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+    """)
+
+    # Seed admin
+    if not db.execute("SELECT id FROM users WHERE email='admin@phishguard.ai'").fetchone():
+        db.execute(
+            "INSERT INTO users (name,email,username,password,is_admin) VALUES (?,?,?,?,?)",
+            ('Admin', 'admin@phishguard.ai', 'admin',
+             generate_password_hash('admin123'), 1))
+
+    # Seed demo user
+    if not db.execute("SELECT id FROM users WHERE email='demo@phishguard.ai'").fetchone():
+        db.execute(
+            "INSERT INTO users (name,email,username,password,is_admin) VALUES (?,?,?,?,?)",
+            ('Demo User', 'demo@phishguard.ai', 'demo',
+             generate_password_hash('demo123'), 0))
+
+    # Seed sample history for demo user
+    demo = db.execute("SELECT id FROM users WHERE email='demo@phishguard.ai'").fetchone()
+    if demo and db.execute(
+            "SELECT COUNT(*) FROM scan_history WHERE user_id=?",
+            (demo['id'],)).fetchone()[0] == 0:
+        samples = [
+            (demo['id'], 'https://www.google.com',         'safe',  97.2, 0, 0, 'xgb,lgb,rf,stack'),
+            (demo['id'], 'http://paypa1-secure.tk/verify',  'phish', 96.1, 1, 0, 'xgb,lgb,rf,stack'),
+            (demo['id'], 'https://github.com/openai',       'safe',  95.8, 0, 0, 'xgb,lgb,rf,stack'),
+            (demo['id'], 'http://192.168.1.1/bank/login',   'phish', 91.3, 1, 0, 'xgb,lgb,rf,stack'),
+            (demo['id'], 'https://www.amazon.com/orders',   'safe',  94.1, 0, 0, 'xgb,lgb,rf,stack'),
+            (demo['id'], 'http://bit.ly/3xK9mN2',           'warn',  68.4, 0, 1, 'xgb,lgb,rf,stack'),
+            (demo['id'], 'http://apple-id-locked.ga/fix',   'phish', 97.5, 1, 0, 'xgb,lgb,rf,stack'),
+            (demo['id'], 'https://stackoverflow.com',       'safe',  98.0, 0, 0, 'xgb,lgb,rf,stack'),
+        ]
+        db.executemany(
+            "INSERT INTO scan_history "
+            "(user_id,url,result,confidence,is_phishing,is_suspicious,algo) "
+            "VALUES (?,?,?,?,?,?,?)",
+            samples)
+
+    db.commit()
+    db.close()
+    log.info(f'DB ready at {DB_PATH}')
+
+
+# ── Call init_db at module load so gunicorn workers initialise it ──
+init_db()
+
+
+# ═══════════════════════════════════════════════════════════════════
 # AUTH DECORATORS
 # ═══════════════════════════════════════════════════════════════════
+
 def login_required(f):
     @wraps(f)
     def w(*a, **kw):
@@ -546,9 +621,11 @@ def admin_required(f):
         return f(*a, **kw)
     return w
 
+
 # ═══════════════════════════════════════════════════════════════════
 # SERVE SPA
 # ═══════════════════════════════════════════════════════════════════
+
 @app.route('/')
 def index():
     return send_from_directory(str(BASE_DIR), 'index.html')
@@ -559,28 +636,34 @@ def static_files(path):
         return jsonify({'ok': False, 'msg': 'Not found'}), 404
     return send_from_directory(str(BASE_DIR), path)
 
+
 # ═══════════════════════════════════════════════════════════════════
 # AUTH ROUTES
 # ═══════════════════════════════════════════════════════════════════
+
 @app.route('/api/login', methods=['POST'])
 def api_login():
-    d = request.get_json(silent=True) or {}
+    d        = request.get_json(silent=True) or {}
     email    = d.get('email', '').strip().lower()
     password = d.get('password', '')
     if not email or not password:
         return jsonify({'ok': False, 'msg': 'Email and password required'})
     user = query("SELECT * FROM users WHERE email=?", (email,), one=True)
     if user and check_password_hash(user['password'], password):
-        session.update({'user_id': user['id'], 'username': user['username'],
-                        'email': user['email'], 'name': user['name'],
-                        'is_admin': bool(user['is_admin'])})
+        session.update({
+            'user_id':  user['id'],
+            'username': user['username'],
+            'email':    user['email'],
+            'name':     user['name'],
+            'is_admin': bool(user['is_admin']),
+        })
         return jsonify({'ok': True, 'id': user['id'], 'name': user['name'],
                         'email': user['email'], 'isAdmin': bool(user['is_admin'])})
     return jsonify({'ok': False, 'msg': 'Invalid email or password'})
 
 @app.route('/api/signup', methods=['POST'])
 def api_signup():
-    d = request.get_json(silent=True) or {}
+    d        = request.get_json(silent=True) or {}
     name     = d.get('name', '').strip()
     email    = d.get('email', '').strip().lower()
     password = d.get('password', '')
@@ -590,12 +673,19 @@ def api_signup():
         return jsonify({'ok': False, 'msg': 'Password must be at least 6 characters'})
     username = email.split('@')[0]
     try:
-        execute("INSERT INTO users (name,email,username,password) VALUES (?,?,?,?)",
-                (name or username, email, username, generate_password_hash(password)))
+        execute(
+            "INSERT INTO users (name,email,username,password) VALUES (?,?,?,?)",
+            (name or username, email, username, generate_password_hash(password)))
         user = query("SELECT * FROM users WHERE email=?", (email,), one=True)
-        session.update({'user_id': user['id'], 'username': user['username'],
-                        'email': user['email'], 'name': user['name'], 'is_admin': False})
-        return jsonify({'ok': True, 'id': user['id'], 'name': user['name'], 'email': user['email']})
+        session.update({
+            'user_id':  user['id'],
+            'username': user['username'],
+            'email':    user['email'],
+            'name':     user['name'],
+            'is_admin': False,
+        })
+        return jsonify({'ok': True, 'id': user['id'],
+                        'name': user['name'], 'email': user['email']})
     except sqlite3.IntegrityError:
         return jsonify({'ok': False, 'msg': 'Email already registered'})
 
@@ -608,20 +698,28 @@ def api_logout():
 def api_me():
     if 'user_id' in session:
         return jsonify({'ok': True, 'user': {
-            'id': session['user_id'], 'name': session.get('name', ''),
+            'id':    session['user_id'],
+            'name':  session.get('name', ''),
             'email': session.get('email', ''),
         }})
     return jsonify({'ok': False}), 401
 
 @app.route('/admin/login', methods=['POST'])
 def admin_login():
-    d = request.get_json(silent=True) or {}
+    d        = request.get_json(silent=True) or {}
     username = d.get('username', '').strip()
     password = d.get('password', '')
-    user = query("SELECT * FROM users WHERE username=? AND is_admin=1", (username,), one=True)
+    user = query(
+        "SELECT * FROM users WHERE username=? AND is_admin=1",
+        (username,), one=True)
     if user and check_password_hash(user['password'], password):
-        session.update({'user_id': user['id'], 'username': user['username'],
-                        'email': user['email'], 'name': user['name'], 'is_admin': True})
+        session.update({
+            'user_id':  user['id'],
+            'username': user['username'],
+            'email':    user['email'],
+            'name':     user['name'],
+            'is_admin': True,
+        })
         return jsonify({'ok': True, 'name': user['name'], 'email': user['email']})
     return jsonify({'ok': False, 'msg': 'Invalid admin credentials'})
 
@@ -630,9 +728,11 @@ def admin_logout():
     session.pop('is_admin', None)
     return jsonify({'ok': True})
 
+
 # ═══════════════════════════════════════════════════════════════════
 # SCAN API
 # ═══════════════════════════════════════════════════════════════════
+
 @app.route('/api/models')
 def api_models():
     return jsonify({'ok': True, 'models': MODEL_INFO})
@@ -648,38 +748,40 @@ def api_scan():
     if not selected:
         selected = list(MODEL_CONFIGS.keys())
 
-    result      = run_ensemble(url, selected)
-    is_phishing = result['isPhishing']
+    result        = run_ensemble(url, selected)
+    is_phishing   = result['isPhishing']
     is_suspicious = result['isSuspicious']
-    verdict     = result['verdict']
-    confidence  = result['confidence']
+    verdict       = result['verdict']
+    confidence    = result['confidence']
 
     execute(
-        "INSERT INTO scan_history (user_id,url,result,confidence,is_phishing,is_suspicious,algo)"
-        " VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO scan_history "
+        "(user_id,url,result,confidence,is_phishing,is_suspicious,algo) "
+        "VALUES (?,?,?,?,?,?,?)",
         (session['user_id'], url, verdict, confidence,
-         int(is_phishing), int(is_suspicious), ','.join(selected))
-    )
+         int(is_phishing), int(is_suspicious), ','.join(selected)))
 
     return jsonify({
-        'ok': True,
-        'result': result,
+        'ok':          True,
+        'result':      result,
         'suggestions': build_suggestions(url, result['features'], is_phishing, is_suspicious),
     })
 
 @app.route('/api/suggest', methods=['POST'])
 @login_required
 def api_suggest():
-    d = request.get_json(silent=True) or {}
-    url  = d.get('url', '')
+    d   = request.get_json(silent=True) or {}
+    url = d.get('url', '')
     feat = d.get('features', {})
-    ip   = d.get('isPhishing', False)
-    isp  = d.get('isSuspicious', False)
+    ip  = d.get('isPhishing', False)
+    isp = d.get('isSuspicious', False)
     return jsonify({'ok': True, 'suggestions': build_suggestions(url, feat, ip, isp)})
+
 
 # ═══════════════════════════════════════════════════════════════════
 # HISTORY
 # ═══════════════════════════════════════════════════════════════════
+
 @app.route('/api/history', methods=['GET'])
 @login_required
 def api_history():
@@ -688,9 +790,14 @@ def api_history():
         "FROM scan_history WHERE user_id=? ORDER BY timestamp DESC",
         (session['user_id'],))
     return jsonify({'ok': True, 'history': [{
-        'id': r['id'], 'url': r['url'], 'result': r['result'],
-        'confidence': r['confidence'], 'isPhishing': bool(r['is_phishing']),
-        'isSuspicious': bool(r['is_suspicious']), 'algo': r['algo'], 'time': r['timestamp'],
+        'id':          r['id'],
+        'url':         r['url'],
+        'result':      r['result'],
+        'confidence':  r['confidence'],
+        'isPhishing':  bool(r['is_phishing']),
+        'isSuspicious':bool(r['is_suspicious']),
+        'algo':        r['algo'],
+        'time':        r['timestamp'],
     } for r in rows]})
 
 @app.route('/api/history', methods=['DELETE'])
@@ -704,69 +811,99 @@ def delete_history():
 def download_csv():
     rows = query(
         "SELECT url,result,confidence,algo,timestamp FROM scan_history "
-        "WHERE user_id=? ORDER BY timestamp DESC", (session['user_id'],))
+        "WHERE user_id=? ORDER BY timestamp DESC",
+        (session['user_id'],))
     out = io.StringIO()
-    w = csv.DictWriter(out, fieldnames=['url','result','confidence','algo','timestamp'])
-    w.writeheader(); w.writerows(rows)
-    return send_file(io.BytesIO(out.getvalue().encode()), mimetype='text/csv',
-                     as_attachment=True, download_name=f'phishshield_{session["username"]}.csv')
+    w = csv.DictWriter(out, fieldnames=['url', 'result', 'confidence', 'algo', 'timestamp'])
+    w.writeheader()
+    w.writerows(rows)
+    return send_file(
+        io.BytesIO(out.getvalue().encode()),
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name=f'phishshield_{session["username"]}.csv')
+
 
 # ═══════════════════════════════════════════════════════════════════
 # ADMIN APIS
 # ═══════════════════════════════════════════════════════════════════
+
 @app.route('/admin/api/stats')
 @admin_required
 def admin_stats():
     tu = query("SELECT COUNT(*) AS n FROM users WHERE is_admin=0", one=True)['n']
     ts = query("SELECT COUNT(*) AS n FROM scan_history", one=True)['n']
-    tp = query("SELECT COUNT(*) AS n FROM scan_history WHERE is_phishing=1 OR result='phish'", one=True)['n']
-    us = query("""SELECT u.email, COUNT(s.id) AS total,
-                         SUM(CASE WHEN s.is_phishing=1 OR s.result='phish' THEN 1 ELSE 0 END) AS phishing
-                  FROM users u LEFT JOIN scan_history s ON u.id=s.user_id
-                  WHERE u.is_admin=0 GROUP BY u.id""")
+    tp = query(
+        "SELECT COUNT(*) AS n FROM scan_history WHERE is_phishing=1 OR result='phish'",
+        one=True)['n']
+    us = query("""
+        SELECT u.email,
+               COUNT(s.id) AS total,
+               SUM(CASE WHEN s.is_phishing=1 OR s.result='phish' THEN 1 ELSE 0 END) AS phishing
+        FROM users u
+        LEFT JOIN scan_history s ON u.id=s.user_id
+        WHERE u.is_admin=0
+        GROUP BY u.id""")
     recent = query("""
         SELECT s.id, s.url, s.result, s.confidence,
                s.is_phishing, s.is_suspicious, s.algo, s.timestamp,
                COALESCE(u.name, u.email) AS userName, u.email AS userEmail
-        FROM   scan_history s JOIN users u ON s.user_id = u.id
-        ORDER  BY s.timestamp DESC LIMIT 20
-    """)
+        FROM   scan_history s
+        JOIN   users u ON s.user_id = u.id
+        ORDER  BY s.timestamp DESC
+        LIMIT  20""")
     safe_count  = ts - tp
     threat_rate = round(tp / ts * 100, 1) if ts else 0
     return jsonify({
-        'ok':            True,
-        'users_count':   tu,
-        'scans_total':   ts,
+        'ok':             True,
+        'users_count':    tu,
+        'scans_total':    ts,
         'phishing_count': tp,
-        'safe_count':    safe_count,
-        'threat_rate':   threat_rate,
-        'recent_scans':  [{
-            'id': r['id'], 'url': r['url'], 'result': r['result'],
-            'confidence': r['confidence'],
-            'isPhishing':   bool(r['is_phishing']),
-            'isSuspicious': bool(r['is_suspicious']),
-            'algo': r['algo'] or '', 'time': r['timestamp'],
-            'userName': r['userName'], 'userEmail': r['userEmail'],
+        'safe_count':     safe_count,
+        'threat_rate':    threat_rate,
+        'recent_scans': [{
+            'id':          r['id'],
+            'url':         r['url'],
+            'result':      r['result'],
+            'confidence':  r['confidence'],
+            'isPhishing':  bool(r['is_phishing']),
+            'isSuspicious':bool(r['is_suspicious']),
+            'algo':        r['algo'] or '',
+            'time':        r['timestamp'],
+            'userName':    r['userName'],
+            'userEmail':   r['userEmail'],
         } for r in recent],
-        'user_stats': {r['email']: {'total': r['total'] or 0,
-                                    'phishing': r['phishing'] or 0} for r in us},
+        'user_stats': {
+            r['email']: {
+                'total':    r['total'] or 0,
+                'phishing': r['phishing'] or 0,
+            } for r in us
+        },
     })
 
 @app.route('/admin/api/users')
 @admin_required
 def admin_users():
     rows = query("""
-        SELECT u.id,u.name,u.email,u.created_at,
+        SELECT u.id, u.name, u.email, u.created_at,
                COUNT(s.id) AS total,
                SUM(CASE WHEN s.is_phishing=1 THEN 1 ELSE 0 END) AS phishing,
                SUM(CASE WHEN s.is_phishing=0 THEN 1 ELSE 0 END) AS safe
-        FROM users u LEFT JOIN scan_history s ON u.id=s.user_id
-        WHERE u.is_admin=0 GROUP BY u.id ORDER BY u.created_at DESC""")
+        FROM   users u
+        LEFT JOIN scan_history s ON u.id=s.user_id
+        WHERE  u.is_admin=0
+        GROUP  BY u.id
+        ORDER  BY u.created_at DESC""")
     return jsonify({'ok': True, 'users': [{
-        'id': r['id'], 'name': r['name'], 'email': r['email'],
-        'createdAt': r['created_at'], 'total': r['total'] or 0,
-        'phishing': r['phishing'] or 0, 'safe': r['safe'] or 0,
-        'level': 'High' if (r['phishing'] or 0) > 5 else ('Medium' if (r['phishing'] or 0) > 2 else 'Low')
+        'id':        r['id'],
+        'name':      r['name'],
+        'email':     r['email'],
+        'createdAt': r['created_at'],
+        'total':     r['total'] or 0,
+        'phishing':  r['phishing'] or 0,
+        'safe':      r['safe'] or 0,
+        'level':     'High' if (r['phishing'] or 0) > 5 else (
+                     'Medium' if (r['phishing'] or 0) > 2 else 'Low'),
     } for r in rows]})
 
 @app.route('/admin/api/users/<email>', methods=['DELETE'])
@@ -786,45 +923,71 @@ def admin_delete_user(email):
 @admin_required
 def admin_history():
     rows = query("""
-        SELECT s.id,u.name AS userName,u.email AS userEmail,
-               s.url,s.result,s.confidence,s.is_phishing,s.is_suspicious,s.algo,s.timestamp
-        FROM scan_history s JOIN users u ON s.user_id=u.id
-        ORDER BY s.timestamp DESC LIMIT 500""")
+        SELECT s.id, u.name AS userName, u.email AS userEmail,
+               s.url, s.result, s.confidence,
+               s.is_phishing, s.is_suspicious, s.algo, s.timestamp
+        FROM   scan_history s
+        JOIN   users u ON s.user_id=u.id
+        ORDER  BY s.timestamp DESC
+        LIMIT  500""")
     return jsonify({'ok': True, 'history': [{
-        'id': r['id'], 'userName': r['userName'], 'userEmail': r['userEmail'],
-        'url': r['url'], 'result': r['result'], 'confidence': r['confidence'],
-        'isPhishing': bool(r['is_phishing']), 'isSuspicious': bool(r['is_suspicious']),
-        'algo': r['algo'], 'time': r['timestamp'],
+        'id':          r['id'],
+        'userName':    r['userName'],
+        'userEmail':   r['userEmail'],
+        'url':         r['url'],
+        'result':      r['result'],
+        'confidence':  r['confidence'],
+        'isPhishing':  bool(r['is_phishing']),
+        'isSuspicious':bool(r['is_suspicious']),
+        'algo':        r['algo'],
+        'time':        r['timestamp'],
     } for r in rows]})
 
 @app.route('/admin/api/reports')
 @admin_required
 def admin_reports():
     ua = query("""
-        SELECT u.name,u.email,COUNT(s.id) AS total,
+        SELECT u.name, u.email,
+               COUNT(s.id) AS total,
                SUM(CASE WHEN s.is_phishing=1 THEN 1 ELSE 0 END) AS phishing,
                SUM(CASE WHEN s.is_phishing=0 THEN 1 ELSE 0 END) AS safe
-        FROM users u LEFT JOIN scan_history s ON u.id=s.user_id
-        WHERE u.is_admin=0 GROUP BY u.id ORDER BY total DESC""")
+        FROM   users u
+        LEFT JOIN scan_history s ON u.id=s.user_id
+        WHERE  u.is_admin=0
+        GROUP  BY u.id
+        ORDER  BY total DESC""")
     tp = query("""
-        SELECT url,COUNT(*) AS count,COUNT(DISTINCT user_id) AS users
-        FROM scan_history WHERE is_phishing=1 GROUP BY url ORDER BY count DESC LIMIT 10""")
-    ts = query("SELECT COUNT(*) AS n FROM scan_history", one=True)['n']
+        SELECT url, COUNT(*) AS count, COUNT(DISTINCT user_id) AS users
+        FROM   scan_history
+        WHERE  is_phishing=1
+        GROUP  BY url
+        ORDER  BY count DESC
+        LIMIT  10""")
+    ts       = query("SELECT COUNT(*) AS n FROM scan_history", one=True)['n']
     tp_count = query("SELECT COUNT(*) AS n FROM scan_history WHERE is_phishing=1", one=True)['n']
     avg_conf = query("SELECT AVG(confidence) AS a FROM scan_history", one=True)['a'] or 0
     return jsonify({
         'ok': True,
         'summary': {
-            'totalScans': ts, 'phishingDetections': tp_count,
-            'avgConfidence': round(avg_conf, 1),
-            'threatRate': round(tp_count / ts * 100) if ts else 0
+            'totalScans':        ts,
+            'phishingDetections':tp_count,
+            'avgConfidence':     round(avg_conf, 1),
+            'threatRate':        round(tp_count / ts * 100) if ts else 0,
         },
-        'userActivity': [{'name': r['name'], 'email': r['email'],
-                          'total': r['total'] or 0, 'phishing': r['phishing'] or 0,
-                          'safe': r['safe'] or 0,
-                          'level': 'High' if (r['phishing'] or 0) > 5 else ('Medium' if (r['phishing'] or 0) > 2 else 'Low')}
-                         for r in ua],
-        'topPhishing': [{'url': r['url'], 'count': r['count'], 'users': r['users']} for r in tp]
+        'userActivity': [{
+            'name':     r['name'],
+            'email':    r['email'],
+            'total':    r['total'] or 0,
+            'phishing': r['phishing'] or 0,
+            'safe':     r['safe'] or 0,
+            'level':    'High' if (r['phishing'] or 0) > 5 else (
+                        'Medium' if (r['phishing'] or 0) > 2 else 'Low'),
+        } for r in ua],
+        'topPhishing': [{
+            'url':   r['url'],
+            'count': r['count'],
+            'users': r['users'],
+        } for r in tp],
     })
 
 @app.route('/admin/api/history/clear', methods=['POST'])
@@ -836,14 +999,20 @@ def admin_clear():
 @app.route('/api/admin/report/download')
 @admin_required
 def admin_report_download():
-    rows = query("""SELECT s.url,s.result,s.confidence,s.timestamp,u.name AS username
-                    FROM scan_history s JOIN users u ON s.user_id=u.id
-                    ORDER BY s.timestamp DESC""")
-    return send_file(io.BytesIO(build_docx(rows, 'Admin', is_admin=True)),
-                     mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                     as_attachment=True, download_name='phishshield_admin_report.docx')
+    rows = query("""
+        SELECT s.url, s.result, s.confidence, s.timestamp, u.name AS username
+        FROM   scan_history s
+        JOIN   users u ON s.user_id=u.id
+        ORDER  BY s.timestamp DESC""")
+    return send_file(
+        io.BytesIO(build_docx(rows, 'Admin', is_admin=True)),
+        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        as_attachment=True,
+        download_name='phishshield_admin_report.docx')
 
-# ── DOCX builder ──────────────────────────────────────────────────
+
+# ── DOCX builder ───────────────────────────────────────────────────
+
 def build_docx(rows, username, is_admin=False):
     try:
         from docx import Document
@@ -853,53 +1022,74 @@ def build_docx(rows, username, is_admin=False):
         phish = sum(1 for r in rows if r.get('result') in ('phish', 'Phishing'))
         t = doc.add_heading('', 0)
         run = t.add_run('PhishShield AI v3.0 — Scan Report')
-        run.font.size = Pt(22); run.font.color.rgb = RGBColor(0x23, 0x50, 0xD8)
+        run.font.size = Pt(22)
+        run.font.color.rgb = RGBColor(0x23, 0x50, 0xD8)
         t.alignment = 1
-        m = doc.add_paragraph(); m.alignment = 1
-        m.add_run(f'{"Full Platform Report" if is_admin else "User: " + username}   ·   Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}')
+        m = doc.add_paragraph()
+        m.alignment = 1
+        m.add_run(
+            f'{"Full Platform Report" if is_admin else "User: " + username}'
+            f'   ·   Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}')
         doc.add_paragraph()
         doc.add_heading('Summary', level=1)
-        st = doc.add_table(rows=1, cols=3); st.style = 'Table Grid'
+        st = doc.add_table(rows=1, cols=3)
+        st.style = 'Table Grid'
         c = st.rows[0].cells
-        c[0].text = f'Total: {total}'; c[1].text = f'Phishing: {phish}'; c[2].text = f'Safe: {total - phish}'
-        doc.add_paragraph(); doc.add_heading('Scan Log', level=1)
-        cols = ['#', 'User', 'URL', 'Result', 'Confidence', 'Timestamp'] if is_admin else ['#', 'URL', 'Result', 'Confidence', 'Timestamp']
-        tbl = doc.add_table(rows=1, cols=len(cols)); tbl.style = 'Table Grid'
-        for i, col in enumerate(cols): tbl.rows[0].cells[i].text = col
+        c[0].text = f'Total: {total}'
+        c[1].text = f'Phishing: {phish}'
+        c[2].text = f'Safe: {total - phish}'
+        doc.add_paragraph()
+        doc.add_heading('Scan Log', level=1)
+        cols = (['#', 'User', 'URL', 'Result', 'Confidence', 'Timestamp']
+                if is_admin else ['#', 'URL', 'Result', 'Confidence', 'Timestamp'])
+        tbl = doc.add_table(rows=1, cols=len(cols))
+        tbl.style = 'Table Grid'
+        for i, col in enumerate(cols):
+            tbl.rows[0].cells[i].text = col
         for idx, row in enumerate(rows, 1):
             cells = tbl.add_row().cells
             if is_admin:
-                cells[0].text = str(idx); cells[1].text = row.get('username', '')
-                u = row.get('url', ''); cells[2].text = u[:60] + '…' if len(u) > 60 else u
-                cells[3].text = row.get('result', ''); cells[4].text = f"{row.get('confidence', '')}%"
+                cells[0].text = str(idx)
+                cells[1].text = row.get('username', '')
+                u = row.get('url', '')
+                cells[2].text = u[:60] + '…' if len(u) > 60 else u
+                cells[3].text = row.get('result', '')
+                cells[4].text = f"{row.get('confidence', '')}%"
                 cells[5].text = str(row.get('timestamp', ''))
             else:
                 cells[0].text = str(idx)
-                u = row.get('url', ''); cells[1].text = u[:70] + '…' if len(u) > 70 else u
-                cells[2].text = row.get('result', ''); cells[3].text = f"{row.get('confidence', '')}%"
+                u = row.get('url', '')
+                cells[1].text = u[:70] + '…' if len(u) > 70 else u
+                cells[2].text = row.get('result', '')
+                cells[3].text = f"{row.get('confidence', '')}%"
                 cells[4].text = str(row.get('timestamp', ''))
         doc.add_paragraph()
         f = doc.add_paragraph('PhishShield AI v3.0 · 9 ML Models · BCA Final Year Project')
         f.alignment = 1
-        buf = io.BytesIO(); doc.save(buf); buf.seek(0); return buf.read()
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        return buf.read()
     except ImportError:
-        return '\n'.join([f"URL: {r.get('url', '')} | {r.get('result', '')} | {r.get('confidence', '')}%" for r in rows]).encode()
+        return '\n'.join([
+            f"URL: {r.get('url', '')} | {r.get('result', '')} | {r.get('confidence', '')}%"
+            for r in rows
+        ]).encode()
 
+
+# ═══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     print('=' * 60)
     print('  PhishShield AI v3.0 — BCA Final Year Project')
     print('  9 ML Models · 30 Features · Stacking Ensemble')
     print('=' * 60)
-    print('  Initialising database…')
-    init_db()
     print(f'  DB: {DB_PATH}')
     print('─' * 60)
     print('  demo@phishguard.ai / demo123')
     print('  admin / admin123  (click Admin button)')
-    print('─' * 60)
-    print('  Models: LR, DT, RF, GB, XGBoost, LightGBM, SVM, MLP, Stack')
-    print('  Best:   Stacking Ensemble (98.5% accuracy)')
     print('─' * 60)
     print('  Open: http://localhost:5000')
     print('=' * 60)
