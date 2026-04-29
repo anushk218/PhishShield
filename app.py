@@ -12,7 +12,8 @@ Accounts:
 """
 
 
-import io, csv, re, sqlite3, json, math, logging, psycopg2, os, psycopg2.extras
+import io, csv, re, json, math, logging, os
+import psycopg2, psycopg2.extras
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -27,7 +28,7 @@ log = logging.getLogger('PhishShield')
 
 # ── App config ────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / 'phishshield.db'
+DATABASE_URL = os.environ.get('dpg-d7o3jau7r5hc73b717sg-a')
 
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path='')
 app.secret_key = 'phishshield-v3-bca-2025-strong-key'
@@ -527,24 +528,26 @@ MODEL_INFO = {k: {'name': v['name'], 'accuracy': v['accuracy'], 'type': v['type'
               for k, v in MODEL_CONFIGS.items()}
 
 # ═══════════════════════════════════════════════════════════════════
-# SQLite DATABASE
+# POSTGRESQL DATABASE (Render)
 # ═══════════════════════════════════════════════════════════════════
 def get_db():
     if 'db' not in g:
-        g.db = sqlite3.connect(str(DB_PATH), detect_types=sqlite3.PARSE_DECLTYPES)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA journal_mode=WAL")
-        g.db.execute("PRAGMA foreign_keys=ON")
+        g.db = psycopg2.connect(DATABASE_URL)
+        g.db.autocommit = False
     return g.db
 
 @app.teardown_appcontext
 def close_db(exc=None):
     db = g.pop('db', None)
-    if db: db.close()
-      
+    if db:
+        try: db.close()
+        except: pass
+
 def query(sql, params=(), one=False):
+    sql = sql.replace('?', '%s')
     db  = get_db()
-    cur = db.execute(sql, params)
+    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(sql, params)
     db.commit()
     if one:
         row = cur.fetchone()
@@ -552,63 +555,78 @@ def query(sql, params=(), one=False):
     return [dict(r) for r in cur.fetchall()]
 
 def execute(sql, params=()):
+    sql = sql.replace('?', '%s')
     db  = get_db()
-    cur = db.execute(sql, params)
+    cur = db.cursor()
+    cur.execute(sql, params)
     db.commit()
     return cur
 
 def init_db():
-    db = sqlite3.connect(str(DB_PATH))
-    db.row_factory = sqlite3.Row
-    db.executescript("""
+    db  = psycopg2.connect(DATABASE_URL)
+    cur = db.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            name       TEXT    NOT NULL DEFAULT '',
-            email      TEXT    NOT NULL UNIQUE,
-            username   TEXT    NOT NULL UNIQUE,
-            password   TEXT    NOT NULL,
-            is_admin   INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT    NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS scan_history (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id       INTEGER NOT NULL,
-            url           TEXT    NOT NULL,
-            result        TEXT    NOT NULL DEFAULT 'safe',
-            confidence    REAL    NOT NULL DEFAULT 0,
-            is_phishing   INTEGER NOT NULL DEFAULT 0,
-            is_suspicious INTEGER NOT NULL DEFAULT 0,
-            algo          TEXT    NOT NULL DEFAULT '',
-            timestamp     TEXT    NOT NULL DEFAULT (datetime('now')),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
+            id         SERIAL PRIMARY KEY,
+            name       TEXT         NOT NULL DEFAULT '',
+            email      VARCHAR(120) NOT NULL UNIQUE,
+            username   VARCHAR(80)  NOT NULL UNIQUE,
+            password   VARCHAR(256) NOT NULL,
+            is_admin   SMALLINT     NOT NULL DEFAULT 0,
+            created_at TIMESTAMP    NOT NULL DEFAULT NOW()
+        )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS scan_history (
+            id            SERIAL PRIMARY KEY,
+            user_id       INTEGER     NOT NULL,
+            url           TEXT        NOT NULL,
+            result        VARCHAR(20) NOT NULL DEFAULT 'safe',
+            confidence    REAL        NOT NULL DEFAULT 0,
+            is_phishing   SMALLINT    NOT NULL DEFAULT 0,
+            is_suspicious SMALLINT    NOT NULL DEFAULT 0,
+            algo          TEXT        NOT NULL DEFAULT '',
+            timestamp     TIMESTAMP   NOT NULL DEFAULT NOW(),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    # Seed admin
+    cur.execute("SELECT id FROM users WHERE email='admin@phishguard.ai'")
+    if not cur.fetchone():
+        cur.execute(
+            "INSERT INTO users (name,email,username,password,is_admin) VALUES (%s,%s,%s,%s,%s)",
+            ('Admin','admin@phishguard.ai','admin',generate_password_hash('admin123'),1))
 
-    if not db.execute("SELECT id FROM users WHERE email='admin@phishguard.ai'").fetchone():
-        db.execute("INSERT INTO users (name,email,username,password,is_admin) VALUES (?,?,?,?,?)",
-                   ('Admin','admin@phishguard.ai','admin', generate_password_hash('admin123'), 1))
+    # Seed demo
+    cur.execute("SELECT id FROM users WHERE email='demo@phishguard.ai'")
+    if not cur.fetchone():
+        cur.execute(
+            "INSERT INTO users (name,email,username,password,is_admin) VALUES (%s,%s,%s,%s,%s)",
+            ('Demo User','demo@phishguard.ai','demo',generate_password_hash('demo123'),0))
 
-    if not db.execute("SELECT id FROM users WHERE email='demo@phishguard.ai'").fetchone():
-        db.execute("INSERT INTO users (name,email,username,password,is_admin) VALUES (?,?,?,?,?)",
-                   ('Demo User','demo@phishguard.ai','demo', generate_password_hash('demo123'), 0))
-
-    demo = db.execute("SELECT id FROM users WHERE email='demo@phishguard.ai'").fetchone()
-    if demo and db.execute("SELECT COUNT(*) FROM scan_history WHERE user_id=?", (demo['id'],)).fetchone()[0] == 0:
-        samples = [
-            (demo['id'],'https://www.google.com',        'safe',  97.2,0,0,'xgb,lgb,rf,stack'),
-            (demo['id'],'http://paypa1-secure.tk/verify','phish', 96.1,1,0,'xgb,lgb,rf,stack'),
-            (demo['id'],'https://github.com/openai',     'safe',  95.8,0,0,'xgb,lgb,rf,stack'),
-            (demo['id'],'http://192.168.1.1/bank/login', 'phish', 91.3,1,0,'xgb,lgb,rf,stack'),
-            (demo['id'],'https://www.amazon.com/orders', 'safe',  94.1,0,0,'xgb,lgb,rf,stack'),
-            (demo['id'],'http://bit.ly/3xK9mN2',         'warn',  68.4,0,1,'xgb,lgb,rf,stack'),
-            (demo['id'],'http://apple-id-locked.ga/fix', 'phish', 97.5,1,0,'xgb,lgb,rf,stack'),
-            (demo['id'],'https://stackoverflow.com',     'safe',  98.0,0,0,'xgb,lgb,rf,stack'),
-        ]
-        db.executemany(
-            "INSERT INTO scan_history (user_id,url,result,confidence,is_phishing,is_suspicious,algo) VALUES (?,?,?,?,?,?,?)",
-            samples)
+    # Seed sample scans
+    cur.execute("SELECT id FROM users WHERE email='demo@phishguard.ai'")
+    demo = cur.fetchone()
+    if demo:
+        cur.execute("SELECT COUNT(*) FROM scan_history WHERE user_id=%s",(demo[0],))
+        if cur.fetchone()[0] == 0:
+            samples = [
+                (demo[0],'https://www.google.com',        'safe',  97.2,0,0,'xgb,lgb,rf,stack'),
+                (demo[0],'http://paypa1-secure.tk/verify','phish', 96.1,1,0,'xgb,lgb,rf,stack'),
+                (demo[0],'https://github.com/openai',     'safe',  95.8,0,0,'xgb,lgb,rf,stack'),
+                (demo[0],'http://192.168.1.1/bank/login', 'phish', 91.3,1,0,'xgb,lgb,rf,stack'),
+                (demo[0],'https://www.amazon.com/orders', 'safe',  94.1,0,0,'xgb,lgb,rf,stack'),
+                (demo[0],'http://bit.ly/3xK9mN2',         'warn',  68.4,0,1,'xgb,lgb,rf,stack'),
+                (demo[0],'http://apple-id-locked.ga/fix', 'phish', 97.5,1,0,'xgb,lgb,rf,stack'),
+                (demo[0],'https://stackoverflow.com',     'safe',  98.0,0,0,'xgb,lgb,rf,stack'),
+            ]
+            cur.executemany(
+                "INSERT INTO scan_history (user_id,url,result,confidence,is_phishing,is_suspicious,algo)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s)", samples)
     db.commit()
+    cur.close()
     db.close()
+    log.info('PostgreSQL DB initialised!')
 
 # ═══════════════════════════════════════════════════════════════════
 # AUTH DECORATORS
