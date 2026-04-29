@@ -2,5 +2,5 @@ Flask==3.0.3
 Werkzeug==3.0.3
 numpy==1.26.4
 python-docx==1.1.2
-gunicorn app:app
+gunicorn
 psycopg2-binary>=2.9.10
