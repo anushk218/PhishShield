@@ -12,8 +12,8 @@ PostgreSQL setup:
     PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
 
 Accounts:
-  demo@phishguard.ai / demo123
-  admin (Admin button) / admin123
+  demo@phishguard.ai / Demo@1234
+  admin (Admin button) / Admin@1234
 """
 
 import io, csv, re, json, math, logging, os
@@ -37,13 +37,46 @@ BASE_DIR = Path(__file__).parent
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path='')
 app.secret_key = 'phishshield-v3-bca-2025-strong-key'
 
+# ── Password Strength Validator ───────────────────────────────────
+def validate_password(password: str):
+    """
+    Returns an error message string if password is invalid, else None.
+    Rules:
+      - Minimum 8 characters
+      - At least 1 uppercase letter (A-Z)
+      - At least 1 lowercase letter (a-z)
+      - At least 1 digit (0-9)
+      - At least 1 special character: @$!%*?&#^()_+-=[]{}|;:,.<>
+    """
+    if len(password) < 8:
+        return "Password must be at least 8 characters long."
+    if not re.search(r'[A-Z]', password):
+        return "Password must contain at least one uppercase letter (A-Z)."
+    if not re.search(r'[a-z]', password):
+        return "Password must contain at least one lowercase letter (a-z)."
+    if not re.search(r'[0-9]', password):
+        return "Password must contain at least one number (0-9)."
+    if not re.search(r'[@$!%*?&#^()_+\-=\[\]{}|;:,.<>]', password):
+        return "Password must contain at least one special character (e.g. @, #, !, $, %)."
+    return None  # All checks passed
+
 # ── PostgreSQL connection settings ───────────────────────────────
-# Override any of these via environment variables, or edit the defaults.
-PG_HOST     = os.environ.get('PGHOST',     'localhost')
-PG_PORT     = int(os.environ.get('PGPORT', 5432))
-PG_DATABASE = os.environ.get('PGDATABASE', 'phishshield')
-PG_USER     = os.environ.get('PGUSER',     'postgres')
-PG_PASSWORD = os.environ.get('PGPASSWORD', 'postgres')
+DATABASE_URL = os.environ.get('DATABASE_URL', None)
+
+if DATABASE_URL:
+    from urllib.parse import urlparse as _urlparse
+    _u          = _urlparse(DATABASE_URL)
+    PG_HOST     = _u.hostname
+    PG_PORT     = _u.port or 5432
+    PG_DATABASE = _u.path.lstrip('/')
+    PG_USER     = _u.username
+    PG_PASSWORD = _u.password
+else:
+    PG_HOST     = os.environ.get('PGHOST',     'localhost')
+    PG_PORT     = int(os.environ.get('PGPORT', 5432))
+    PG_DATABASE = os.environ.get('PGDATABASE', 'phishshield')
+    PG_USER     = os.environ.get('PGUSER',     'postgres')
+    PG_PASSWORD = os.environ.get('PGPASSWORD', 'postgres')
 
 
 def get_pg_conn():
@@ -53,7 +86,6 @@ def get_pg_conn():
             host=PG_HOST, port=PG_PORT, dbname=PG_DATABASE,
             user=PG_USER, password=PG_PASSWORD,
         )
-        # Use DictCursor so rows behave like dicts
         g.pg_conn.cursor_factory = psycopg2.extras.RealDictCursor
     return g.pg_conn
 
@@ -146,7 +178,6 @@ BRAND_MAP = {
     'bankofamerica':'https://www.bankofamerica.com',
 }
 
-# ── Feature names exposed to frontend ────────────────────────────
 FEATURE_NAMES = [
     # Group 1: URL Structure
     'url_length','url_depth','num_dots','num_hyphens','num_underscores',
@@ -183,7 +214,6 @@ def extract_features_v3(raw_url: str) -> dict:
         full_l = full.lower()
         domain = host.replace('www.', '')
 
-        # Group 1: URL Structure
         f['url_length']      = len(url)
         f['url_depth']       = len([x for x in path.split('/') if x])
         f['num_dots']        = host.count('.')
@@ -197,7 +227,6 @@ def extract_features_v3(raw_url: str) -> dict:
         f['num_percent']     = url.count('%')
         f['num_space']       = url.count('%20') + url.count('+')
 
-        # Group 2: Domain
         f['has_ip']          = int(bool(re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host)))
         f['domain_length']   = len(domain)
         f['subdomain_count'] = max(0, host.count('.') - 1)
@@ -207,7 +236,6 @@ def extract_features_v3(raw_url: str) -> dict:
         f['bad_tld']         = int(any(domain.endswith(t) for t in BAD_TLDS))
         f['safe_tld']        = int(any(domain.endswith(t) for t in SAFE_TLDS))
 
-        # Group 3: Lexical / Entropy
         f['url_entropy']      = round(_entropy(url), 4)
         f['host_entropy']     = round(_entropy(host), 4)
         digit_url  = sum(c.isdigit() for c in url)
@@ -217,13 +245,11 @@ def extract_features_v3(raw_url: str) -> dict:
         special    = sum(not c.isalnum() for c in url)
         f['special_ratio']    = round(special / max(len(url), 1), 4)
 
-        # Group 4: Semantic / Keyword
         kw_hits = sum(1 for kw in PHISH_KEYWORDS if kw in full_l)
         f['phish_keyword_count'] = kw_hits
         f['has_login_keyword']   = int(any(k in full_l for k in ['login','signin','verify','password','credential']))
         f['has_brand_keyword']   = int(any(b in host and not host.endswith(f'{b}.com') for b in BRAND_MAP))
 
-        # Group 5: Path / Query
         f['has_redirect']    = int('//' in path or 'redirect' in full_l or 'url=' in full_l)
         f['has_port']        = int(bool(p.port) and p.port not in (80, 443))
         f['query_length']    = len(query)
@@ -235,7 +261,6 @@ def extract_features_v3(raw_url: str) -> dict:
 
     return f
 
-# ── Per-model weights (tuned from training experiments) ──────────
 MODEL_CONFIGS = {
     'lr': {
         'name': 'Logistic Regression', 'accuracy': 96.8, 'type': 'Linear',
@@ -573,7 +598,6 @@ def init_db():
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     cur = conn.cursor()
 
-    # ── Create tables ────────────────────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id         SERIAL PRIMARY KEY,
@@ -601,21 +625,23 @@ def init_db():
     """)
 
     # ── Seed admin account ───────────────────────────────────────
+    # Password: Admin@1234  (meets all validation rules)
     cur.execute("SELECT id FROM users WHERE email = %s", ('admin@phishguard.ai',))
     if not cur.fetchone():
         cur.execute(
             "INSERT INTO users (name, email, username, password, is_admin) VALUES (%s, %s, %s, %s, %s)",
             ('Admin', 'admin@phishguard.ai', 'admin',
-             generate_password_hash('admin123'), 1)
+             generate_password_hash('Admin@1234'), 1)
         )
 
     # ── Seed demo account ────────────────────────────────────────
+    # Password: Demo@1234  (meets all validation rules)
     cur.execute("SELECT id FROM users WHERE email = %s", ('demo@phishguard.ai',))
     if not cur.fetchone():
         cur.execute(
             "INSERT INTO users (name, email, username, password, is_admin) VALUES (%s, %s, %s, %s, %s)",
             ('Demo User', 'demo@phishguard.ai', 'demo',
-             generate_password_hash('demo123'), 0)
+             generate_password_hash('Demo@1234'), 0)
         )
 
     # ── Seed sample scan history for demo user ───────────────────
@@ -704,10 +730,15 @@ def api_signup():
     name     = d.get('name', '').strip()
     email    = d.get('email', '').strip().lower()
     password = d.get('password', '')
+
     if not email or not password:
         return jsonify({'ok': False, 'msg': 'Email and password required'})
-    if len(password) < 6:
-        return jsonify({'ok': False, 'msg': 'Password must be at least 6 characters'})
+
+    # ── Password strength validation ──────────────────────────────
+    error = validate_password(password)
+    if error:
+        return jsonify({'ok': False, 'msg': error})
+
     username = email.split('@')[0]
     try:
         execute(
@@ -719,7 +750,6 @@ def api_signup():
                         'email': user['email'], 'name': user['name'], 'is_admin': False})
         return jsonify({'ok': True, 'id': user['id'], 'name': user['name'], 'email': user['email']})
     except psycopg2.errors.UniqueViolation:
-        # Roll back the failed transaction so the connection stays usable
         get_pg_conn().rollback()
         return jsonify({'ok': False, 'msg': 'Email already registered'})
 
@@ -745,6 +775,15 @@ def admin_login():
     d = request.get_json(silent=True) or {}
     username = d.get('username', '').strip()
     password = d.get('password', '')
+
+    if not username or not password:
+        return jsonify({'ok': False, 'msg': 'Username and password required'})
+
+    # ── Password strength validation ──────────────────────────────
+    error = validate_password(password)
+    if error:
+        return jsonify({'ok': False, 'msg': error})
+
     user = query(
         "SELECT * FROM users WHERE username = %s AND is_admin = 1",
         (username,), one=True
@@ -947,7 +986,6 @@ def admin_delete_user(email):
     u = query("SELECT id FROM users WHERE email = %s", (email,), one=True)
     if not u:
         return jsonify({'ok': False, 'msg': 'User not found'})
-    # ON DELETE CASCADE handles scan_history; explicit delete retained for clarity
     execute("DELETE FROM scan_history WHERE user_id = %s", (u['id'],))
     execute("DELETE FROM users WHERE id = %s", (u['id'],))
     return jsonify({'ok': True})
@@ -1105,17 +1143,26 @@ def build_docx(rows, username, is_admin=False):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Run init_db on startup (works with both Gunicorn and direct run)
+# ═══════════════════════════════════════════════════════════════════
+with app.app_context():
+    try:
+        init_db()
+        log.info("Database initialised successfully")
+    except Exception as e:
+        log.error(f"DB init failed: {e}")
+
 if __name__ == '__main__':
     print('=' * 60)
     print('  PhishShield AI v3.0 — BCA Final Year Project')
     print('  9 ML Models · 30 Features · Stacking Ensemble')
     print('=' * 60)
-    print('  Initialising PostgreSQL database…')
-    init_db()
     print(f'  DB: {PG_DATABASE} @ {PG_HOST}:{PG_PORT}')
     print('─' * 60)
-    print('  demo@phishguard.ai / demo123')
-    print('  admin / admin123  (click Admin button)')
+    print('  demo@phishguard.ai  /  Demo@1234')
+    print('  admin / Admin@1234  (click Admin button)')
+    print('─' * 60)
+    print('  Password rules: 8+ chars, uppercase, lowercase, digit, symbol')
     print('─' * 60)
     print('  Models: LR, DT, RF, GB, XGBoost, LightGBM, SVM, MLP, Stack')
     print('  Best:   Stacking Ensemble (98.5% accuracy)')
